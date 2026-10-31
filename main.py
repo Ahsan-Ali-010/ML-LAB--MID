@@ -1,16 +1,11 @@
-import os
 import joblib
-import numpy as np
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from schemas import HousingInput, IrisInput, SentimentInput
 
-app = FastAPI(
-    title="California Housing & Iris Prediction API",
-    description="Backend API serving California Housing Regression and Iris Species Classification models.",
-)
+app = FastAPI(title="ML Model Serving API")
 
-# Enabling CORS for direct browser connection from local files
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,98 +14,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Path definitions
-REG_PATH = "models/regression.joblib"
-CLS_PATH = "models/classification.joblib"
+try:
+    reg_model = joblib.load("models/regression.joblib")
+    cls_model = joblib.load("models/classification.joblib")
+    sentiment_model = joblib.load("models/sentiment.joblib")
+except Exception as e:
+    print(f"Error loading models: {e}. Please run python train.py first.")
 
-if not os.path.exists(REG_PATH) or not os.path.exists(CLS_PATH):
-    raise RuntimeError("Missing model files. Run 'python train.py' first.")
+@app.post("/predict/housing")
+def predict_housing(data: HousingInput):
+    df = pd.DataFrame([data.model_dump()])
+    prediction = reg_model.predict(df)[0]
+    return {"formatted_price": f"${prediction * 100000:,.2f}"}
 
-reg_model = joblib.load(REG_PATH)
-cls_model = joblib.load(CLS_PATH)
+@app.post("/predict/iris")
+def predict_iris(data: IrisInput, threshold: float = 0.5):
+    df = pd.DataFrame([{
+        'sepal length (cm)': data.sepal_length,
+        'sepal width (cm)': data.sepal_width,
+        'petal length (cm)': data.petal_length,
+        'petal width (cm)': data.petal_width
+    }])
+    proba = cls_model.predict_proba(df)[0][1]
+    is_virginica = bool(proba >= threshold)
+    return {
+        "predicted_species": "Virginica" if is_virginica else "Non-Virginica",
+        "probability": float(proba)
+    }
 
-IRIS_CLASSES = ["setosa", "versicolor", "virginica"]
-
-
-# Input Data Schemas
-class HousingInput(BaseModel):
-    MedInc: float = Field(
-        ...,
-        description="Median income in block group (e.g., 3.8 = $38,000)",
-        example=3.83,
-    )
-    HouseAge: float = Field(
-        ..., description="Median house age in years", example=21.0
-    )
-    AveRooms: float = Field(
-        ..., description="Average rooms per household", example=6.2
-    )
-    Population: float = Field(
-        ..., description="Block group population", example=850.0
-    )
-
-
-class IrisInput(BaseModel):
-    sepal_length: float = Field(
-        ..., description="Sepal length in cm", example=5.1
-    )
-    sepal_width: float = Field(
-        ..., description="Sepal width in cm", example=3.5
-    )
-    petal_length: float = Field(
-        ..., description="Petal length in cm", example=1.4
-    )
-    petal_width: float = Field(
-        ..., description="Petal width in cm", example=0.2
-    )
-
-
-@app.get("/")
-def home():
-    return {"status": "Active", "message": "ML Model API is live!"}
-
-
-@app.post("/predict/regression")
-def predict_regression(data: HousingInput):
-    try:
-        features = np.array(
-            [[data.MedInc, data.HouseAge, data.AveRooms, data.Population]]
-        )
-        prediction = reg_model.predict(features)[0]
-        # California housing values are expressed in $100,000s
-        estimated_usd = float(prediction * 100000)
-
-        return {
-            "predicted_raw_val": round(float(prediction), 4),
-            "estimated_price_usd": round(estimated_usd, 2),
-            "formatted_price": f"${estimated_usd:,.2f}",
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/predict/classification")
-def predict_classification(data: IrisInput):
-    try:
-        features = np.array(
-            [[
-                data.sepal_length,
-                data.sepal_width,
-                data.petal_length,
-                data.petal_width,
-            ]]
-        )
-        pred_class_id = int(cls_model.predict(features)[0])
-        probabilities = cls_model.predict_proba(features)[0].tolist()
-        class_name = IRIS_CLASSES[pred_class_id]
-
-        return {
-            "class_id": pred_class_id,
-            "predicted_species": class_name,
-            "probabilities": {
-                IRIS_CLASSES[i]: round(probabilities[i], 4)
-                for i in range(len(IRIS_CLASSES))
-            },
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/predict/sentiment")
+def predict_sentiment(data: SentimentInput):
+    pred = sentiment_model.predict([data.text])[0]
+    proba = sentiment_model.predict_proba([data.text])[0][1]
+    return {
+        "sentiment": "Positive" if pred == 1 else "Negative",
+        "confidence": float(proba if pred == 1 else 1 - proba)
+    }
